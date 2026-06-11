@@ -29,8 +29,7 @@ function Format-Size {
 }
 
 # ── Helper: get directory size (recursive) ────────────────────────────────────
-
-function Get-DirSize{
+function Get-DirSize {
     param([string]$Path)
 
     if (-not (Test-Path $Path)) {
@@ -47,7 +46,6 @@ function Get-DirSize{
 
     return [long]$size
 }
-
 
 # ── Collect matching entries ───────────────────────────────────────────────────
 $found = [System.Collections.Generic.List[hashtable]]::new()
@@ -72,13 +70,11 @@ foreach ($regPath in $regPaths) {
 
             if ($displayName -match 'solidworks') {
 
-                # ── Screen output ──────────────────────────────────────────────
                 Write-Host "Found: $displayName  $hive" -ForegroundColor Yellow
                 Write-Host "  Registry Key   : $($key.Name)"
                 Write-Host "  InstallLocation: $(if ($installLocation) { $installLocation } else { '(not set)' })"
                 Write-Host "  UninstallString: $(if ($uninstallString) { $uninstallString } else { '(not set)' })"
 
-                # ── Directory size ─────────────────────────────────────────────
                 $sizeDisplay = '(no InstallLocation set)'
                 $sizeBytes   = 0L
                 if ($installLocation -and (Test-Path $installLocation)) {
@@ -121,7 +117,7 @@ Write-Host "  Total install footprint: $(Format-Size -Bytes $totalBytes)" -Foreg
 Write-Host ""
 
 # ── Generate batch file ────────────────────────────────────────────────────────
-$batchPath = Join-Path $PSScriptRoot 'Uninstall-SolidWorks.bat'
+$batchPath  = Join-Path $PSScriptRoot 'Uninstall-SolidWorks.bat'
 $batchLines = [System.Collections.Generic.List[string]]::new()
 
 $batchLines.Add('@echo off')
@@ -144,9 +140,6 @@ $batchLines.Add('')
 $index = 0
 foreach ($entry in $found) {
     $index++
-    $label      = "PRODUCT_$index"
-    $labelDone  = "DONE_$index"
-    $labelNoDir = "NODIR_$index"
 
     $batchLines.Add(":: ── Product $index of $($found.Count) ─────────────────────────────────────────")
     $batchLines.Add("echo [%DATE% %TIME%] Starting uninstall $index of $($found.Count):")
@@ -155,11 +148,8 @@ foreach ($entry in $found) {
     $batchLines.Add('echo.')
 
     if ($entry.UninstallString) {
-        # Some uninstall strings embed the exe+args in one string; wrap in cmd /c
-        # Strings containing .exe with switches are passed as-is.
         $uninstCmd = $entry.UninstallString.Trim()
 
-        # If the string starts with MsiExec / msiexec keep it clean; otherwise quote-wrap
         if ($uninstCmd -imatch '^msiexec') {
             $batchLines.Add("echo Running: $uninstCmd")
             $batchLines.Add($uninstCmd)
@@ -167,40 +157,65 @@ foreach ($entry in $found) {
             $batchLines.Add("echo Running: $uninstCmd")
             $batchLines.Add('cmd /c "' + $uninstCmd + '"')
         }
-        $batchLines.Add("echo Uninstall command returned exit code: %ERRORLEVEL%")
+        $batchLines.Add('echo Uninstall command returned exit code: %ERRORLEVEL%')
     } else {
-        $batchLines.Add("echo WARNING: No UninstallString found for this product. Skipping.")
+        $batchLines.Add('echo WARNING: No UninstallString found for this product. Skipping.')
     }
 
     $batchLines.Add('echo.')
 
-    # Post-uninstall directory check
-if ($entry.InstallLocation) {
-    $loc = $entry.InstallLocation.TrimEnd('\')
-    $batchLines.Add(":: Post-uninstall directory check")
-    $batchLines.Add('if exist "' + $loc + '" (')
-    $batchLines.Add('    echo Directory still exists after uninstall:')
-    $batchLines.Add('    echo   ' + $loc)
-    $batchLines.Add('    echo Measuring remaining size...')
-    $batchLines.Add('    for /f "usebackq tokens=*" %%S in (`powershell -NoProfile -Command "')
-    $batchLines.Add('        $b=(Get-ChildItem -Path ''' + $loc + ''' -Recurse -Force -EA SilentlyContinue |')
-    $batchLines.Add('        Where-Object{!$_.PSIsContainer}|Measure-Object -Property Length -Sum).Sum;')
-    $batchLines.Add('        if($b -ge 1GB){"{0:N2} GB"-f($b/1GB)}')
-    $batchLines.Add('        elseif($b -ge 1MB){"{0:N2} MB"-f($b/1MB)}')
-    $batchLines.Add('        elseif($b -ge 1KB){"{0:N2} KB"-f($b/1KB)}')
-    $batchLines.Add('        else{"$b bytes"}"`) do (')
-    $batchLines.Add('        echo   Remaining size: %%S')
-    $batchLines.Add('    )')
-    $batchLines.Add('    echo.')
-    $batchLines.Add('    echo NOTE: You may need to manually delete this directory.')
-    $batchLines.Add(') else (')
-    $batchLines.Add('    echo Directory successfully removed: ' + $loc)
-    $batchLines.Add(')')
-} else {
-    $batchLines.Add("echo (No InstallLocation was recorded — skipping directory check.)")
-}
+    # ── Post-uninstall directory check ────────────────────────────────────────
+    #
+    # Two bugs fixed here vs previous versions:
+    #
+    # BUG 1 (previous version): Multi-line Add() calls put bare pipe characters
+    #   on their own lines in the .bat, causing "| was unexpected at this time."
+    #   Fix: entire PS command is one concatenated string.
+    #
+    # BUG 2 (this version): The else clause used else{"$b bytes"} which contains
+    #   an inner double-quote ( " ).  cmd.exe sees the outer for /f wrapper as:
+    #      ... -Command "...else{"   <- double-quote closes the cmd string here!
+    #   Everything after that point lands outside the quoted block and is parsed
+    #   as raw batch syntax, producing the parser error about a missing ' terminator.
+    #   Fix: use else{[string]$b+' bytes'} — no double-quotes inside the PS command.
+    #
+    # BUG 3 (defensive): Embedding $loc inside PS single-quotes breaks if the path
+    #   ever contains an apostrophe.
+    #   Fix: pass the path via a temporary env var (SW_CHECK_PATH) so the PS command
+    #   reads $env:SW_CHECK_PATH — no path quoting inside the PS command at all.
+    #
+    if ($entry.InstallLocation) {
+        $loc = $entry.InstallLocation.TrimEnd('\')
 
+        # PS command: zero double-quotes inside, path via env var
+        $psCmd = (
+            '$b=(Get-ChildItem -Path $env:SW_CHECK_PATH -Recurse -Force -EA SilentlyContinue' +
+            '|Where-Object{!$_.PSIsContainer}|Measure-Object -Property Length -Sum).Sum;' +
+            'if($null -eq $b){$b=0};' +
+            "if(`$b -ge 1GB){'{0:N2} GB'-f(`$b/1GB)}" +
+            "elseif(`$b -ge 1MB){'{0:N2} MB'-f(`$b/1MB)}" +
+            "elseif(`$b -ge 1KB){'{0:N2} KB'-f(`$b/1KB)}" +
+            'else{[string]$b+'' bytes''}'
+        )
+        $forLine = '    for /f "usebackq tokens=*" %%S in (`powershell -NoProfile -Command "' + $psCmd + '"`) do ('
 
+        $batchLines.Add(':: Post-uninstall directory check')
+        $batchLines.Add('set "SW_CHECK_PATH=' + $loc + '"')
+        $batchLines.Add('if exist "' + $loc + '" (')
+        $batchLines.Add('    echo Directory still exists after uninstall:')
+        $batchLines.Add('    echo   ' + $loc)
+        $batchLines.Add('    echo Measuring remaining size...')
+        $batchLines.Add($forLine)
+        $batchLines.Add('        echo   Remaining size: %%S')
+        $batchLines.Add('    )')
+        $batchLines.Add('    echo.')
+        $batchLines.Add('    echo NOTE: You may need to manually delete this directory.')
+        $batchLines.Add(') else (')
+        $batchLines.Add('    echo Directory successfully removed: ' + $loc)
+        $batchLines.Add(')')
+    } else {
+        $batchLines.Add('echo (No InstallLocation was recorded -- skipping directory check.)')
+    }
 
     $batchLines.Add('echo.')
     $batchLines.Add("echo ── Product $index complete ──────────────────────────────────────────")
@@ -214,7 +229,7 @@ $batchLines.Add('echo ========================================================')
 $batchLines.Add('pause')
 $batchLines.Add('endlocal')
 
-# Write batch file (ANSI — cmd.exe friendly)
+# Write batch file (ANSI encoding — cmd.exe friendly)
 $batchContent = $batchLines -join "`r`n"
 [System.IO.File]::WriteAllText($batchPath, $batchContent, [System.Text.Encoding]::Default)
 
