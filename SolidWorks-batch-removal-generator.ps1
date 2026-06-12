@@ -36,15 +36,20 @@ function Get-DirSize {
         return -1
     }
 
-    $size = (Get-ChildItem -Path $Path -Recurse -Force -ErrorAction SilentlyContinue |
-             Where-Object { -not $_.PSIsContainer } |
-             Measure-Object -Property Length -Sum).Sum
+try {
+    $measure = Get-ChildItem -LiteralPath $loc -Recurse -Force -EA SilentlyContinue |
+               Measure-Object -Property Length -Sum
 
-    if ($null -eq $size) {
-        return [long]0
+    if ($measure -and $measure.Sum) {
+        $sizeBytes = [long]$measure.Sum
+    } else {
+        $sizeBytes = 0
     }
-
-    return [long]$size
+}
+catch {
+    Write-Warning "Failed to measure install size for $loc : $_"
+    $sizeBytes = 0
+}
 }
 
 # ── Collect matching entries ───────────────────────────────────────────────────
@@ -118,6 +123,8 @@ Write-Host ""
 
 # ── Generate batch file ────────────────────────────────────────────────────────
 $batchPath  = Join-Path $PSScriptRoot 'Uninstall-SolidWorks.bat'
+Write-Host "Batch file: $batchPath"
+
 $batchLines = [System.Collections.Generic.List[string]]::new()
 
 $batchLines.Add('@echo off')
@@ -184,6 +191,7 @@ foreach ($entry in $found) {
     #   Fix: pass the path via a temporary env var (SW_CHECK_PATH) so the PS command
     #   reads $env:SW_CHECK_PATH — no path quoting inside the PS command at all.
     #
+
 if ($entry.InstallLocation) {
     $loc = $entry.InstallLocation.TrimEnd('\')
     $escapedLoc = $loc.Replace('"','\"')
@@ -194,12 +202,20 @@ if ($entry.InstallLocation) {
     $batchLines.Add('    echo   ' + $loc)
     $batchLines.Add('    echo Measuring remaining size...')
 
-    # Only run size check if uninstall exit code was 0
+    # Skip size check if uninstall failed
     $batchLines.Add('    if NOT "%ERRORLEVEL%"=="0" goto SkipSizeCheck')
 
-    # Single-line PowerShell command
-    $psCmd = '$b=(Get-ChildItem -LiteralPath \"' + $escapedLoc + '\" -Recurse -Force -EA SilentlyContinue | Where-Object { -not $_.PSIsContainer } | Measure-Object -Property Length -Sum).Sum; ' +
-             'if($b -ge 1GB){"{0:N2} GB"-f($b/1GB)} elseif($b -ge 1MB){"{0:N2} MB"-f($b/1MB)} elseif($b -ge 1KB){"{0:N2} KB"-f($b/1KB)} else{"$b bytes"}'
+    # Safe, single-line PowerShell command
+
+    $psCmd = '$b=(Get-ChildItem -LiteralPath \"' + $escapedLoc + '\" -Recurse -Force -EA SilentlyContinue | ' +
+         'Where-Object { -not $_.PSIsContainer } | Measure-Object -Property Length -Sum).Sum; ' +
+         'if($null -eq $b){ $b = 0 }; ' +
+         'if($b -ge 1GB){ [math]::Round($b/1GB,2).ToString() + \" GB\" } ' +
+         'elseif($b -ge 1MB){ [math]::Round($b/1MB,2).ToString() + \" MB\" } ' +
+         'elseif($b -ge 1KB){ [math]::Round($b/1KB,2).ToString() + \" KB\" } ' +
+         'else{ \"$b bytes\" }'
+
+
 
     $batchLines.Add('    for /f "usebackq tokens=*" %%S in (`powershell -NoProfile -Command "' + $psCmd + '"`) do (')
     $batchLines.Add('        echo   Remaining size: %%S')
@@ -215,6 +231,7 @@ if ($entry.InstallLocation) {
 else {
     $batchLines.Add("echo (No InstallLocation was recorded — skipping directory check.)")
 }
+
 
 
     $batchLines.Add('echo.')
