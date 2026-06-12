@@ -184,38 +184,38 @@ foreach ($entry in $found) {
     #   Fix: pass the path via a temporary env var (SW_CHECK_PATH) so the PS command
     #   reads $env:SW_CHECK_PATH — no path quoting inside the PS command at all.
     #
-    if ($entry.InstallLocation) {
-        $loc = $entry.InstallLocation.TrimEnd('\')
+if ($entry.InstallLocation) {
+    $loc = $entry.InstallLocation.TrimEnd('\')
+    $escapedLoc = $loc.Replace('"','\"')
 
-        # PS command: zero double-quotes inside, path via env var
-        $psCmd = (
-            '$b=(Get-ChildItem -Path $env:SW_CHECK_PATH -Recurse -Force -EA SilentlyContinue' +
-            '|Where-Object{!$_.PSIsContainer}|Measure-Object -Property Length -Sum).Sum;' +
-            'if($null -eq $b){$b=0};' +
-            "if(`$b -ge 1GB){'{0:N2} GB'-f(`$b/1GB)}" +
-            "elseif(`$b -ge 1MB){'{0:N2} MB'-f(`$b/1MB)}" +
-            "elseif(`$b -ge 1KB){'{0:N2} KB'-f(`$b/1KB)}" +
-            'else{[string]$b+'' bytes''}'
-        )
-        $forLine = '    for /f "usebackq tokens=*" %%S in (`powershell -NoProfile -Command "' + $psCmd + '"`) do ('
+    $batchLines.Add(":: Post-uninstall directory check")
+    $batchLines.Add('if exist "' + $loc + '" (')
+    $batchLines.Add('    echo Directory still exists after uninstall:')
+    $batchLines.Add('    echo   ' + $loc)
+    $batchLines.Add('    echo Measuring remaining size...')
 
-        $batchLines.Add(':: Post-uninstall directory check')
-        $batchLines.Add('set "SW_CHECK_PATH=' + $loc + '"')
-        $batchLines.Add('if exist "' + $loc + '" (')
-        $batchLines.Add('    echo Directory still exists after uninstall:')
-        $batchLines.Add('    echo   ' + $loc)
-        $batchLines.Add('    echo Measuring remaining size...')
-        $batchLines.Add($forLine)
-        $batchLines.Add('        echo   Remaining size: %%S')
-        $batchLines.Add('    )')
-        $batchLines.Add('    echo.')
-        $batchLines.Add('    echo NOTE: You may need to manually delete this directory.')
-        $batchLines.Add(') else (')
-        $batchLines.Add('    echo Directory successfully removed: ' + $loc)
-        $batchLines.Add(')')
-    } else {
-        $batchLines.Add('echo (No InstallLocation was recorded -- skipping directory check.)')
-    }
+    # Only run size check if uninstall exit code was 0
+    $batchLines.Add('    if NOT "%ERRORLEVEL%"=="0" goto SkipSizeCheck')
+
+    # Single-line PowerShell command
+    $psCmd = '$b=(Get-ChildItem -LiteralPath \"' + $escapedLoc + '\" -Recurse -Force -EA SilentlyContinue | Where-Object { -not $_.PSIsContainer } | Measure-Object -Property Length -Sum).Sum; ' +
+             'if($b -ge 1GB){"{0:N2} GB"-f($b/1GB)} elseif($b -ge 1MB){"{0:N2} MB"-f($b/1MB)} elseif($b -ge 1KB){"{0:N2} KB"-f($b/1KB)} else{"$b bytes"}'
+
+    $batchLines.Add('    for /f "usebackq tokens=*" %%S in (`powershell -NoProfile -Command "' + $psCmd + '"`) do (')
+    $batchLines.Add('        echo   Remaining size: %%S')
+    $batchLines.Add('    )')
+
+    $batchLines.Add('    :SkipSizeCheck')
+    $batchLines.Add('    echo.')
+    $batchLines.Add('    echo NOTE: You may need to manually delete this directory.')
+    $batchLines.Add(') else (')
+    $batchLines.Add('    echo Directory successfully removed: ' + $loc)
+    $batchLines.Add(')')
+}
+else {
+    $batchLines.Add("echo (No InstallLocation was recorded — skipping directory check.)")
+}
+
 
     $batchLines.Add('echo.')
     $batchLines.Add("echo ── Product $index complete ──────────────────────────────────────────")
@@ -224,7 +224,7 @@ foreach ($entry in $found) {
 }
 
 $batchLines.Add('echo ========================================================')
-$batchLines.Add('echo  All uninstall commands have been executed.')
+$batchLines.Add('echo  All uninstall commands were  attempted / executed.')
 $batchLines.Add('echo ========================================================')
 $batchLines.Add('pause')
 $batchLines.Add('endlocal')
